@@ -33,9 +33,19 @@ end
 
 # ----- Full TimeGAN training loop ---------------------------------------------------------
 """
-    train(tg, data; epochs, verbose, verbosity)
+    function train(tg, data; epochs, verbose, verbosity)
 
-Full training loop for a TimeGAN network `tg`.
+Train a TimeGAN model `tg` on data.
+
+# Arguments
+- `tg::TimeGAN`: TimeGAN model to train
+- `data`: Data to train on
+- `epochs::Int=50`: Number of epochs to train
+- `verbose::Bool=false`: Print training progress
+- `verbosity::Int=1_000`: Print progress every `verbosity` epochs
+
+# Returns
+- `tg`: Trained TimeGAN model
 """
 function train(
     tg::TimeGAN, data;
@@ -162,6 +172,12 @@ end
     generate_data(tg)
 
 Generates data from a TimeGAN network `tg`.
+
+# Arguments
+- `tg::TimeGAN`: TimeGAN model to generate data from 
+
+# Returns
+- `data`: Generated data
 """
 function generate_data(tg::TimeGAN)
     g, r, s = tg.generator, tg.recovery, tg.supervisor
@@ -170,3 +186,5 @@ function generate_data(tg::TimeGAN)
     Flux.reset!([g, r, s])
     [r(s(g(z))) for z ∈ Z]
 end
+
+
