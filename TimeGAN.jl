@@ -1,31 +1,34 @@
 using Flux
+using Flux: Adam
 using Statistics
 using UnPack
 using Zygote: ignore
+using CUDA
 
 include("loss_functions.jl")
 
-@Base.kwdef mutable struct TimeGAN
+@kwdef mutable struct TimeGAN
     embedder
     recovery
     generator
     supervisor
     discriminator
-    opt_er0 = ADAM()
-    opt_er = ADAM()
-    opt_gs = ADAM()
-    opt_s = ADAM()
-    opt_d = ADAM()
+    opt_er0 = Adam()
+    opt_er = Adam()
+    opt_gs = Adam()
+    opt_s = Adam()
+    opt_d = Adam()
+    use_gpu::Bool = false
     batchsize::Int = 128
     z_dim::Int = 5 # TODO: infer from data and match dim?
     seqlen::Int = 24
-    λ::Float32 = 1f0 # Loss balancing hyperparameter
-    η::Float32 = 1f1 # Loss balancing hyperparameter
-    discriminator_loss::Float32 = 0f0
-    generator_loss::Float32 = 0f0
-    joint_reconstruction_loss::Float32 = 0f0
-    reconstruction_loss::Float32 = 0f0
-    supervised_loss::Float32 = 0f0
+    λ::Float32 = 1.0f0 # Loss balancing hyperparameter
+    η::Float32 = 1.0f1 # Loss balancing hyperparameter
+    discriminator_loss::Float32 = 0.0f0
+    generator_loss::Float32 = 0.0f0
+    joint_reconstruction_loss::Float32 = 0.0f0
+    reconstruction_loss::Float32 = 0.0f0
+    supervised_loss::Float32 = 0.0f0
 end
 
 # ----- Full TimeGAN training loop ---------------------------------------------------------
@@ -35,12 +38,18 @@ end
 Full training loop for a TimeGAN network `tg`.
 """
 function train(
-    tg::TimeGAN, data; 
-    epochs::Int = 50, verbose::Bool = false, verbosity::Int = 1_000
+    tg::TimeGAN, data;
+    epochs::Int=50, verbose::Bool=false, verbosity::Int=1_000
 )
     verbose && println("===== Start TimeGAN training ", "="^51)
     d, e, g, r, s = tg.discriminator, tg.embedder, tg.generator, tg.recovery, tg.supervisor
     @unpack opt_d, opt_er0, opt_er, opt_gs, opt_s, batchsize, z_dim, seqlen, λ, η = tg
+
+    # Set up GPU
+    if tg.use_gpu
+        data, d, e, g, r, s = map(gpu, [data, d, e, g, r, s])
+    end
+
     Flux.trainmode!([d, e, g, r, s])
     # 1. Embedding network training --------------------------------------------------------
     verbose && println("----- Start Embedding network training ", "-"^41)
@@ -49,7 +58,7 @@ function train(
         Flux.reset!([e, r])
         X = sample_batch(data, tg)
         ∇ = gradient(θ_er) do
-            loss = η*reconstruction_loss(e, r, X)
+            loss = η * reconstruction_loss(e, r, X)
             ignore() do
                 tg.reconstruction_loss = loss
             end
@@ -70,8 +79,8 @@ function train(
     for epoch ∈ 1:epochs
         Flux.reset!([e, s]) # Embedder also needs to be reset to compute embedding
         X = sample_batch(data, tg)
-        H = [e(x) for x ∈ X]
-        ∇ = gradient(θ_s) do 
+        H = e.(X)
+        ∇ = gradient(θ_s) do
             loss = supervised_loss(s, H)
             ignore() do
                 tg.supervised_loss = loss
@@ -97,14 +106,15 @@ function train(
             Flux.reset!([d, e, g, r, s])
             X = sample_batch(data, tg)
             Z = random_generator(batchsize, z_dim, seqlen)
-            H = [e(x) for x ∈ X]
+            H = e.(X)
             # Traing generator
             ∇ = gradient(θ_gs) do
                 loss = generator_loss(d, g, s, H, Z)
                 ignore() do
                     tg.generator_loss = loss
                 end
-                loss
+
+                return loss
             end
             Flux.update!(opt_gs, θ_gs, ∇)
             # Train embedder
@@ -114,7 +124,8 @@ function train(
                 ignore() do
                     tg.joint_reconstruction_loss = loss
                 end
-                loss
+
+                return loss
             end
             Flux.update!(opt_er, θ_er, ∇)
         end
@@ -124,9 +135,9 @@ function train(
         X = sample_batch(data, tg)
         Z = random_generator(batchsize, z_dim, seqlen)
         # Combine Y vectors
-        H = [embedder(x) for x ∈ X]
-        Ê = [generator(z) for z ∈ Z]
-        Ĥ = [supervisor(ê) for ê ∈ Ê]
+        H = embedder.(X)
+        Ê = generator.(Z)
+        Ĥ = supervisor.(Ê)
         Ỹ = [hcat(H[i], Ê[i], Ĥ[i]) for i ∈ 1:seqlen]
         y = hcat(ones(Float32, 1, batchsize), zeros(Float32, 1, 2batchsize))
         # Train discriminator
@@ -138,7 +149,7 @@ function train(
             loss
         end
         # Only update discriminator if it does not perform well
-        tg.discriminator_loss > .15 && Flux.update!(opt_d, θ_d, ∇)
+        tg.discriminator_loss > 0.15 && Flux.update!(opt_d, θ_d, ∇)
         if verbose # Checkpoint, print current loss
             if (epoch % verbosity == 0) || epoch == 1
                 println("Epoch $epoch, discriminator loss: ", tg.discriminator_loss)
